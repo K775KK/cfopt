@@ -1,0 +1,68 @@
+name: Refresh CF Optimal IPs
+
+# 每 6 小时刷新一次优选池。
+# 注意：GitHub Actions 的 cron 是 UTC 时间，且高峰期可能延迟 10~30 分钟。
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch: {}
+
+# 需要写权限才能把 result.txt 提交回仓库
+permissions:
+  contents: write
+
+# 同一时刻只跑一个实例，避免两次定时撞车
+concurrency:
+  group: cfopt-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 三网探针实测
+        env:
+          # 可选：在仓库 Settings -> Secrets 里加 GLOBALPING_TOKEN，额度 250 -> 500 次/小时
+          GLOBALPING_TOKEN: ${{ secrets.GLOBALPING_TOKEN }}
+        run: |
+          node cfopt.js \
+            --per-isp 12 \
+            --probes 3 \
+            --concurrency 5 \
+            --top 8 \
+            --out result.txt
+
+      - name: 提交结果
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # 首次运行时 result.csv 可能不存在，逐个判断避免 git add 报错中断
+          for f in result.txt result.csv; do
+            [ -f "$f" ] && git add "$f"
+          done
+          if git diff --staged --quiet; then
+            echo "::notice::结果无变化，跳过提交"
+            exit 0
+          fi
+          git commit -m "chore: refresh CF optimal IPs [skip ci]"
+          git push
+
+      - name: 摘要
+        if: always()
+        run: |
+          {
+            echo "## 优选池刷新结果"
+            echo ""
+            echo '```'
+            cat result.txt 2>/dev/null || echo "（没有产出结果文件）"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
